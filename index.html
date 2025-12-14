@@ -880,12 +880,14 @@
             // Step 2: Draw the orb gradient sphere
             ctx.drawImage(orbImage, 0, 0, size, size);
 
-            // Step 3: Draw foreground image (centered and scaled) on top
-            const scale = Math.min(size / foregroundImage.width, size / foregroundImage.height) * 0.85;
+            // Step 3: Draw foreground image (scaled and positioned for PFP effect)
+            // Scale to fill the orb area (slightly larger to avoid floating effect)
+            const scale = Math.min(size / foregroundImage.width, size / foregroundImage.height) * 1.05;
             const scaledWidth = foregroundImage.width * scale;
             const scaledHeight = foregroundImage.height * scale;
+            // Center horizontally, but position lower so body extends to bottom
             const x = (size - scaledWidth) / 2;
-            const y = (size - scaledHeight) / 2;
+            const y = (size - scaledHeight) * 0.35;
 
             ctx.drawImage(foregroundImage, x, y, scaledWidth, scaledHeight);
 
