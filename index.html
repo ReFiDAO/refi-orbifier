@@ -774,6 +774,9 @@
         const shareBtn = document.getElementById('share-btn');
         const resetBtn = document.getElementById('reset-btn');
 
+        const gallerySection = document.getElementById('gallery-section');
+        const galleryGrid = document.getElementById('gallery-grid');
+
         const ctx = previewCanvas.getContext('2d');
 
         // State
@@ -800,6 +803,137 @@
         let pinchStartScale = null;
         let pinchStartMidpoint = null; // {x,y}
         let pinchStartImagePoint = null; // {ix,iy} in image coords at start
+
+        // Local gallery (persisted in browser)
+        const ORBIFIED_GALLERY_STORAGE_KEY = 'orbified_gallery_v1';
+        const ORBIFIED_GALLERY_MAX_ITEMS = 20;
+        let currentOrbifiedEntryId = null; // the entry being edited for the current upload
+        let selectedGalleryEntryId = null; // selected thumbnail id
+        let isViewingSavedOrbified = false;
+        let galleryPersistTimer = null;
+
+        function loadOrbifiedGallery() {
+            try {
+                const raw = localStorage.getItem(ORBIFIED_GALLERY_STORAGE_KEY);
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed.filter((x) => x && typeof x.id === 'string' && typeof x.dataUrl === 'string');
+            } catch {
+                return [];
+            }
+        }
+
+        function saveOrbifiedGallery(items) {
+            try {
+                localStorage.setItem(ORBIFIED_GALLERY_STORAGE_KEY, JSON.stringify(items));
+                return true;
+            } catch (e) {
+                // Storage might be full (localStorage ~5MB). Fail gracefully.
+                console.warn('Failed to save Orbified gallery:', e);
+                return false;
+            }
+        }
+
+        function upsertOrbifiedGalleryItem(id, dataUrl) {
+            const items = loadOrbifiedGallery();
+            const idx = items.findIndex((x) => x.id === id);
+            if (idx >= 0) {
+                items[idx] = { ...items[idx], dataUrl, updatedAt: Date.now() };
+            } else {
+                items.unshift({ id, dataUrl, createdAt: Date.now() });
+            }
+            return saveOrbifiedGallery(items.slice(0, ORBIFIED_GALLERY_MAX_ITEMS));
+        }
+
+        function createNewOrbifiedGalleryItem(dataUrl) {
+            const id = String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+            const items = loadOrbifiedGallery();
+            items.unshift({ id, dataUrl, createdAt: Date.now() });
+            saveOrbifiedGallery(items.slice(0, ORBIFIED_GALLERY_MAX_ITEMS));
+            return id;
+        }
+
+        function renderOrbifiedGallery() {
+            if (!gallerySection || !galleryGrid) return;
+            const items = loadOrbifiedGallery();
+
+            if (items.length > 0) {
+                gallerySection.classList.add('visible');
+            } else {
+                gallerySection.classList.remove('visible');
+            }
+
+            galleryGrid.innerHTML = '';
+            for (const item of items) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'gallery-item' + (item.id === selectedGalleryEntryId ? ' selected' : '');
+                btn.setAttribute('role', 'listitem');
+                btn.setAttribute('aria-label', 'View orbified PFP from gallery');
+
+                const img = document.createElement('img');
+                img.className = 'gallery-thumb';
+                img.loading = 'lazy';
+                img.alt = 'Orbified PFP thumbnail';
+                img.src = item.dataUrl;
+
+                btn.appendChild(img);
+                btn.addEventListener('click', () => selectOrbifiedFromGallery(item.id));
+                galleryGrid.appendChild(btn);
+            }
+        }
+
+        function drawDataUrlToCanvas(dataUrl) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+                    ctx.drawImage(img, 0, 0, previewCanvas.width, previewCanvas.height);
+                    resolve();
+                };
+                img.onerror = () => reject(new Error('Failed to load saved image'));
+                img.src = dataUrl;
+            });
+        }
+
+        async function selectOrbifiedFromGallery(id) {
+            const items = loadOrbifiedGallery();
+            const item = items.find((x) => x.id === id);
+            if (!item) return;
+
+            selectedGalleryEntryId = id;
+            isViewingSavedOrbified = true;
+            currentOrbifiedEntryId = null;
+            processedImageData = item.dataUrl;
+
+            // Disable editor controls while viewing a saved, flattened image
+            if (editorControls) editorControls.classList.add('hidden');
+            foregroundBitmap = null;
+
+            previewSection.classList.add('visible');
+            await drawDataUrlToCanvas(item.dataUrl).catch(() => {});
+            renderOrbifiedGallery();
+        }
+
+        function beginNewOrbifiedSession() {
+            isViewingSavedOrbified = false;
+            if (editorControls) editorControls.classList.remove('hidden');
+            currentOrbifiedEntryId = null;
+            selectedGalleryEntryId = null;
+        }
+
+        function persistCurrentOrbifiedDebounced() {
+            if (!currentOrbifiedEntryId) return;
+            if (!processedImageData) return;
+            if (isViewingSavedOrbified) return;
+
+            if (galleryPersistTimer) clearTimeout(galleryPersistTimer);
+            galleryPersistTimer = setTimeout(() => {
+                upsertOrbifiedGalleryItem(currentOrbifiedEntryId, processedImageData);
+                renderOrbifiedGallery();
+            }, 250);
+        }
 
         function revealApiKeySection(message) {
             if (!apiSection) return;
@@ -874,6 +1008,9 @@
             }
 
             processedImageData = previewCanvas.toDataURL('image/png');
+
+            // Keep the current "generated" entry updated as the user edits
+            persistCurrentOrbifiedDebounced();
         }
 
         function setZoomPercent(percent, anchorCanvasPoint = null) {
@@ -960,6 +1097,10 @@
             previewCanvas.addEventListener('pointerup', handleCanvasPointerUp);
             previewCanvas.addEventListener('pointercancel', handleCanvasPointerUp);
             previewCanvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
+
+            // Initial UI state
+            if (editorControls) editorControls.classList.add('hidden');
+            renderOrbifiedGallery();
         }
 
         function handleCanvasPointerDown(e) {
@@ -1145,6 +1286,7 @@
             }
 
             // Process the image
+            beginNewOrbifiedSession();
             processImage(file);
         }
 
@@ -1213,6 +1355,16 @@
             foregroundBitmap = foregroundImage;
             setDefaultSubjectTransform();
             renderComposite();
+
+            // Save a new entry for this generation (and keep it updated as the user edits)
+            if (processedImageData) {
+                isViewingSavedOrbified = false;
+                if (editorControls) editorControls.classList.remove('hidden');
+                const id = createNewOrbifiedGalleryItem(processedImageData);
+                currentOrbifiedEntryId = id;
+                selectedGalleryEntryId = id;
+                renderOrbifiedGallery();
+            }
         }
 
         // Download
@@ -1245,6 +1397,8 @@ Thanks @ReFiDAOist & @iamjohnellison for this awesome tool!
             fileInput.value = '';
             processedImageData = null;
             foregroundBitmap = null;
+            currentOrbifiedEntryId = null;
+            isViewingSavedOrbified = false;
             activePointers.clear();
             dragPointerId = null;
             lastDragPoint = null;
@@ -1257,6 +1411,7 @@ Thanks @ReFiDAOist & @iamjohnellison for this awesome tool!
             subjectX = 0;
             subjectY = 0;
             if (subjectZoomInput) subjectZoomInput.value = '100';
+            if (editorControls) editorControls.classList.add('hidden');
             ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
             hideMessages();
         }
